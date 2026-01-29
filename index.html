@@ -5,61 +5,118 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Davao Weather Map</title>
 
-  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="manifest" href="manifest.webmanifest" />
   <meta name="theme-color" content="#111111" />
 
   <style>
     html, body { height: 100%; margin: 0; font-family: system-ui, Arial; }
-    #topbar { padding: 10px; border-bottom: 1px solid #ddd; }
-    #map { height: calc(100% - 52px); }
+    #topbar {
+      padding: 10px;
+      border-bottom: 1px solid #ddd;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
     #status { font-size: 14px; opacity: 0.9; }
-    button { padding: 8px 10px; }
+    #map { height: calc(100% - 120px); }
+    button, select, input { padding: 8px 10px; }
+    input { width: 220px; }
   </style>
 </head>
 <body>
   <div id="topbar">
     <button id="locBtn">Use my location</button>
+
+    <select id="condition">
+      <option value="Sunny">Sunny</option>
+      <option value="Cloudy">Cloudy</option>
+      <option value="Rainy">Rainy</option>
+      <option value="Windy">Windy</option>
+      <option value="Storm">Storm</option>
+      <option value="Flooding">Flooding</option>
+    </select>
+
+    <input id="note" placeholder="Optional note (e.g., heavy rain)" maxlength="120" />
+    <button id="postBtn">Post update</button>
+
     <span id="status">Waiting for location permission…</span>
   </div>
+
   <div id="map"></div>
 
   <script>
-    // PWA: register service worker (no offline behavior; just needed for installability)
+    // PWA installability
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+      navigator.serviceWorker.register("sw.js").catch(() => {});
     }
 
+    // -----------------------------
+    // 1) PUT YOUR SUPABASE INFO HERE
+    // -----------------------------
+    const SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co";
+    const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+    // Map + state
     const statusEl = document.getElementById("status");
     const locBtn = document.getElementById("locBtn");
+    const postBtn = document.getElementById("postBtn");
+    const conditionEl = document.getElementById("condition");
+    const noteEl = document.getElementById("note");
 
     let map;
-    let marker;
+    let userMarker;
+    let userPos = null;
 
-    // Default center: Davao City (fallback if location denied)
-    const davaoCity = { lat: 7.070200, lng: 125.607596 };
+    const davaoCity = { lat: 7.070200, lng: 125.607596 }; // Davao City center
 
-    function setStatus(msg) {
-      statusEl.textContent = msg;
+    // report markers
+    const reportMarkers = new Map(); // id -> marker
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    function timeAgo(iso) {
+      const t = new Date(iso).getTime();
+      const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h ago`;
+      const d = Math.floor(h / 24);
+      return `${d}d ago`;
+    }
+
+    function iconFor(cond) {
+      const map = {
+        Sunny: "☀️",
+        Cloudy: "☁️",
+        Rainy: "🌧️",
+        Windy: "🌬️",
+        Storm: "⛈️",
+        Flooding: "🌊"
+      };
+      return map[cond] || "📍";
     }
 
     function initMap() {
       map = new google.maps.Map(document.getElementById("map"), {
         center: davaoCity,
-        zoom: 13,
+        zoom: 12,
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: true,
       });
 
-      // Initial marker at Davao (until we get user location)
-      marker = new google.maps.Marker({
+      userMarker = new google.maps.Marker({
         position: davaoCity,
         map,
-        title: "Davao City (default)",
+        title: "Davao City (default view)",
       });
 
-      // Ask for location immediately on load
-      requestLocation();
+      requestLocation();     // ask on load
+      loadReports();         // load existing reports
+      setInterval(loadReports, 30000); // refresh every 30s
     }
 
     function requestLocation() {
@@ -72,36 +129,128 @@
 
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const userPos = {
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-          };
-
-          marker.setPosition(userPos);
-          marker.setTitle("You are here");
+          userPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          userMarker.setPosition(userPos);
+          userMarker.setTitle("You are here");
           map.setCenter(userPos);
-          map.setZoom(16);
-
+          map.setZoom(15);
           setStatus(`Location OK: ${userPos.lat.toFixed(5)}, ${userPos.lng.toFixed(5)}`);
+          loadReports(); // reload with nearby view
         },
-        (err) => {
-          // If denied/unavailable, keep Davao City
-          setStatus("Location denied/unavailable. Showing Davao City.");
+        () => {
+          userPos = null;
+          userMarker.setPosition(davaoCity);
+          userMarker.setTitle("Davao City (default view)");
           map.setCenter(davaoCity);
-          map.setZoom(13);
+          map.setZoom(12);
+          setStatus("Location denied/unavailable. Showing Davao City.");
+          loadReports();
         },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 30000,
-        }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
       );
     }
 
     locBtn.addEventListener("click", requestLocation);
+
+    // -----------------------------
+    // Supabase REST helpers
+    // -----------------------------
+    async function supabaseFetch(path, options = {}) {
+      const url = `${SUPABASE_URL}${path}`;
+      const headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      };
+      const res = await fetch(url, { ...options, headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${res.statusText}: ${text}`);
+      }
+      return res;
+    }
+
+    // Load latest reports (simple: recent 100)
+    // Later you can filter by distance.
+    async function loadReports() {
+      try {
+        // get latest 100 reports
+        const res = await supabaseFetch(
+          `/rest/v1/reports?select=id,created_at,lat,lng,condition,note&order=created_at.desc&limit=100`
+        );
+        const data = await res.json();
+
+        // Remove markers that no longer exist in the latest data
+        const ids = new Set(data.map(r => r.id));
+        for (const [id, m] of reportMarkers.entries()) {
+          if (!ids.has(id)) {
+            m.setMap(null);
+            reportMarkers.delete(id);
+          }
+        }
+
+        // Add/update markers
+        for (const r of data) {
+          if (!reportMarkers.has(r.id)) {
+            const marker = new google.maps.Marker({
+              position: { lat: r.lat, lng: r.lng },
+              map,
+              title: `${r.condition}`,
+              label: iconFor(r.condition), // emoji label
+            });
+
+            const info = new google.maps.InfoWindow({
+              content: `
+                <div style="font-family:system-ui; font-size:14px;">
+                  <div><b>${iconFor(r.condition)} ${r.condition}</b></div>
+                  <div style="opacity:.8;">${timeAgo(r.created_at)}</div>
+                  <div>${r.note ? r.note : ""}</div>
+                </div>
+              `
+            });
+
+            marker.addListener("click", () => info.open({ anchor: marker, map }));
+            reportMarkers.set(r.id, marker);
+          }
+        }
+      } catch (e) {
+        console.error(e);
+        setStatus("Reports failed to load. Check Supabase settings.");
+      }
+    }
+
+    // Post a new report at user location
+    postBtn.addEventListener("click", async () => {
+      try {
+        if (!userPos) {
+          alert("Enable location first so we can place your weather pin.");
+          return;
+        }
+
+        const payload = {
+          lat: userPos.lat,
+          lng: userPos.lng,
+          condition: conditionEl.value,
+          note: noteEl.value.trim() || null,
+        };
+
+        await supabaseFetch(`/rest/v1/reports`, {
+          method: "POST",
+          headers: { "Prefer": "return=minimal" },
+          body: JSON.stringify(payload)
+        });
+
+        noteEl.value = "";
+        setStatus("Posted! Loading updates…");
+        await loadReports();
+      } catch (e) {
+        console.error(e);
+        alert("Failed to post. Check console + Supabase policies.");
+      }
+    });
   </script>
 
-  <!-- Google Maps JS API -->
   <script async
     src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCCv3fMlFc7PxJXR4Y65zJTsxPbWxnpc8I&callback=initMap">
   </script>
