@@ -46,18 +46,13 @@
   <div id="map"></div>
 
   <script>
-    // PWA installability
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("sw.js").catch(() => {});
     }
 
-    // -----------------------------
-    // 1) PUT YOUR SUPABASE INFO HERE
-    // -----------------------------
     const SUPABASE_URL = "https://mylxpghozcxekasbniqm.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15bHhwZ2hvemN4ZWthc2JuaXFtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3MDAyNzksImV4cCI6MjA4NTI3NjI3OX0.-cdzpuUZ9z5KrTgCvy2v9aja9a9QaQ0BHKTfWAx5SJs";
 
-    // Map + state
     const statusEl = document.getElementById("status");
     const locBtn = document.getElementById("locBtn");
     const postBtn = document.getElementById("postBtn");
@@ -68,10 +63,9 @@
     let userMarker;
     let userPos = null;
 
-    const davaoCity = { lat: 7.070200, lng: 125.607596 }; // Davao City center
+    const davaoCity = { lat: 7.070200, lng: 125.607596 };
 
-    // report markers
-    const reportMarkers = new Map(); // id -> marker
+    const reportMarkers = new Map();
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -114,11 +108,12 @@
         title: "Davao City (default view)",
       });
 
-      requestLocation();     // ask on load
-      loadReports();         // load existing reports
-      setInterval(loadReports, 30000); // refresh every 30s
+      requestLocation();
+      loadReports();
+      setInterval(loadReports, 30000);
     }
 
+    /* ===== ONLY CHANGE IS HERE ===== */
     function requestLocation() {
       if (!("geolocation" in navigator)) {
         setStatus("Geolocation not supported on this device.");
@@ -135,7 +130,7 @@
           map.setCenter(userPos);
           map.setZoom(15);
           setStatus(`Location OK: ${userPos.lat.toFixed(5)}, ${userPos.lng.toFixed(5)}`);
-          loadReports(); // reload with nearby view
+          loadReports();
         },
         () => {
           userPos = null;
@@ -146,15 +141,24 @@
           setStatus("Location denied/unavailable. Showing Davao City.");
           loadReports();
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0   // FORCE fresh location every load
+        }
       );
+
+      const watchId = navigator.geolocation.watchPosition(
+        () => {},
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 0 }
+      );
+      setTimeout(() => navigator.geolocation.clearWatch(watchId), 2000);
     }
+    /* ===== END CHANGE ===== */
 
     locBtn.addEventListener("click", requestLocation);
 
-    // -----------------------------
-    // Supabase REST helpers
-    // -----------------------------
     async function supabaseFetch(path, options = {}) {
       const url = `${SUPABASE_URL}${path}`;
       const headers = {
@@ -171,17 +175,13 @@
       return res;
     }
 
-    // Load latest reports (simple: recent 100)
-    // Later you can filter by distance.
     async function loadReports() {
       try {
-        // get latest 100 reports
         const res = await supabaseFetch(
           `/rest/v1/reports?select=id,created_at,lat,lng,condition,note&order=created_at.desc&limit=100`
         );
         const data = await res.json();
 
-        // Remove markers that no longer exist in the latest data
         const ids = new Set(data.map(r => r.id));
         for (const [id, m] of reportMarkers.entries()) {
           if (!ids.has(id)) {
@@ -190,14 +190,13 @@
           }
         }
 
-        // Add/update markers
         for (const r of data) {
           if (!reportMarkers.has(r.id)) {
             const marker = new google.maps.Marker({
               position: { lat: r.lat, lng: r.lng },
               map,
               title: `${r.condition}`,
-              label: iconFor(r.condition), // emoji label
+              label: iconFor(r.condition),
             });
 
             const info = new google.maps.InfoWindow({
@@ -220,7 +219,6 @@
       }
     }
 
-    // Post a new report at user location
     postBtn.addEventListener("click", async () => {
       try {
         if (!userPos) {
